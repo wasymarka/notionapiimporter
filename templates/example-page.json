@@ -1,0 +1,16 @@
+{
+  "kind": "page",
+  "title": "Example Page from Template",
+  "icon": null,
+  "cover": null,
+  "children": [
+    {
+      "type": "heading_1",
+      "heading_1": { "rich_text": [{ "type": "text", "text": { "content": "Welcome" } }] }
+    },
+    {
+      "type": "paragraph",
+      "paragraph": { "rich_text": [{ "type": "text", "text": { "content": "This page was created from a JSON template." } }] }
+    }
+  ]
+}

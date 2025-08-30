@@ -1,0 +1,28 @@
+{
+  "kind": "database",
+  "title": "Example Tasks DB",
+  "icon": null,
+  "cover": null,
+  "properties": {
+    "Name": { "type": "title" },
+    "Status": {
+      "type": "status",
+      "status": {
+        "options": [
+          { "name": "Todo", "color": "red" },
+          { "name": "In Progress", "color": "yellow" },
+          { "name": "Done", "color": "green" }
+        ]
+      }
+    },
+    "Tags": {
+      "type": "multi_select",
+      "multi_select": {
+        "options": [
+          { "name": "Feature", "color": "blue" },
+          { "name": "Bug", "color": "orange" }
+        ]
+      }
+    }
+  }
+}

@@ -154,6 +154,50 @@ async function exportMaster(pageOrDbId) {
   }
 }
 
+// Helper to extract plain title text from a Page object
+function getPageTitleText(page) {
+  const props = page.properties || {};
+  for (const [name, prop] of Object.entries(props)) {
+    if (prop?.type === 'title' && Array.isArray(prop.title)) {
+      const text = prop.title.map(t => t.plain_text || t.text?.content || '').join('');
+      if (text) return text;
+    }
+  }
+  return 'Untitled';
+}
+
+// Build a portable JSON template from an existing page or database
+async function exportToTemplate(id) {
+  const master = await exportMaster(id);
+  if (master.kind === 'page') {
+    const title = getPageTitleText(master.page);
+    const icon = master.page.icon || null;
+    const cover = master.page.cover || null;
+    const children = sanitizeBlocks(master.blocks || []);
+    return {
+      kind: 'page',
+      title,
+      icon,
+      cover,
+      children,
+    };
+  }
+  if (master.kind === 'database') {
+    const title = (master.database.title || []).map(t => t.plain_text || t.text?.content || '').join('') || 'Untitled DB';
+    const icon = master.database.icon || null;
+    const cover = master.database.cover || null;
+    const properties = transformPropertiesToCreate(master.database.properties || {});
+    return {
+      kind: 'database',
+      title,
+      icon,
+      cover,
+      properties,
+    };
+  }
+  throw new Error('Unsupported kind');
+}
+
 async function getDatabaseTitlePropName(databaseId) {
   ensureClient();
   const db = await withRetry(() => ensureClient().databases.retrieve({ database_id: databaseId }));
@@ -295,6 +339,33 @@ async function main() {
         if (!fs.existsSync(fullPath)) throw new Error('Template file not found');
         const res = await createFromJsonTemplate(fullPath, args.targetId, args.parentType);
         spinner.succeed(kleur.green(`Created: ${res.url || res.id}`));
+      } catch (err) {
+        spinner.fail(kleur.red(err.message));
+        process.exitCode = 1;
+      }
+    })
+    // New: export an existing page/database to a JSON template
+    .command(['to-json <id> [outFile]', 'export-json <id> [outFile]'], 'Export existing page or database into a JSON template', (y) => {
+      return y
+        .positional('id', { describe: 'ID of a Notion page or database to export', type: 'string' })
+        .positional('outFile', { describe: 'Optional output file path; if omitted, prints to stdout', type: 'string' })
+        .option('pretty', { type: 'boolean', default: true, describe: 'Pretty-print JSON with indentation' });
+    }, async (args) => {
+      const spinner = ora('Exporting to JSON template...').start();
+      try {
+        assertIdLike(args.id, 'id');
+        const tpl = await exportToTemplate(args.id);
+        const json = JSON.stringify(tpl, null, args.pretty ? 2 : 0);
+        if (args.outFile) {
+          const outPath = path.resolve(process.cwd(), args.outFile);
+          const dir = path.dirname(outPath);
+          if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+          fs.writeFileSync(outPath, json, 'utf8');
+          spinner.succeed(kleur.green(`Exported template to: ${outPath}`));
+        } else {
+          spinner.stop();
+          process.stdout.write(json + '\n');
+        }
       } catch (err) {
         spinner.fail(kleur.red(err.message));
         process.exitCode = 1;
