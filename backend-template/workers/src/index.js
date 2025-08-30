@@ -3,6 +3,7 @@
 // - GET /a/start
 // - GET /a/pause
 // - GET /a/stop
+// - POST /webhook/:name?secret=APP_SECRET
 // Env: APP_SECRET, NOTION_TOKEN
 
 import crypto from 'node:crypto';
@@ -41,6 +42,18 @@ export default {
   async fetch(request, env) {
     try {
       const url = new URL(request.url);
+      // Webhook route first
+      const webhookMatch = url.pathname.match(/^\/webhook\/([A-Za-z0-9_-]+)$/);
+      if (webhookMatch) {
+        if (request.method !== 'POST') return json(405, { error: 'Method Not Allowed' });
+        const provided = url.searchParams.get('secret');
+        const secret = env.APP_SECRET;
+        if (!secret) return json(500, { error: 'Missing APP_SECRET' });
+        if (!provided || provided !== secret) return json(401, { error: 'Invalid secret' });
+        const body = await request.json().catch(() => null);
+        return json(200, { ok: true, webhook: webhookMatch[1], received: !!body });
+      }
+
       if (!url.pathname.startsWith('/a/')) return json(404, { error: 'Not Found' });
       const action = url.pathname.split('/').pop();
       const secret = env.APP_SECRET;

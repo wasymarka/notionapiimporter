@@ -65,3 +65,24 @@ install:
   seeds:
     tasks:
       - Name: "Sample Task"
+
+workflows:
+  # Automatically attach Start/Pause/Stop action links into the Tasks DB URL properties
+  - type: attach_action_links
+    database: tasks
+    calendar_database: calendar
+
+  # Define a generic webhook endpoint that can be used by automations
+  - type: webhook
+    name: task_completed
+    method: POST
+    path: /webhook/task-completed
+    description: Fires when a task is marked Done.
+
+  # Describe a suggested property-change trigger that calls the webhook above
+  - type: property_change
+    database: tasks
+    property: Status
+    when:
+      changes_to: Done
+    webhook: task_completed

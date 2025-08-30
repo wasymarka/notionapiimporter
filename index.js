@@ -394,6 +394,24 @@ async function main() {
         process.exitCode = 1;
       }
     })
+    .command('refresh-actions <tasksDbId>', 'Re-issue signed Start/Pause/Stop URLs for all tasks in a database', (y) => {
+      return y
+        .positional('tasksDbId', { describe: 'Tasks database ID', type: 'string' })
+        .option('baseUrl', { type: 'string', demandOption: true, describe: 'Backend base URL (e.g., https://app.vercel.app/api)' })
+        .option('appSecret', { type: 'string', demandOption: true, describe: 'HMAC secret used by the backend' })
+        .option('calendarDbId', { type: 'string', describe: 'Optional Calendar database ID for stop action payload' });
+    }, async (args) => {
+      const spinner = ora('Refreshing action URLs...').start();
+      try {
+        assertIdLike(args.tasksDbId, 'tasksDbId');
+        if (args.calendarDbId) assertIdLike(args.calendarDbId, 'calendarDbId');
+        await refreshActionLinks(args.tasksDbId, args.baseUrl, args.appSecret, args.calendarDbId);
+        spinner.succeed(kleur.green('Refreshed action URLs for all tasks.'));
+      } catch (err) {
+        spinner.fail(kleur.red(err.message));
+        process.exitCode = 1;
+      }
+    })
     .demandCommand(1)
     .help()
     .argv;
@@ -451,7 +469,7 @@ function buildDbProperties(schema = {}, aliasToId = {}) {
           // Fallback: will set later, but create a placeholder the API rejects; so skip for now
           continue;
         }
-        out[name] = { relation: { database_id: dbId, type: 'single_property', single_property: {} } };
+        out[name] = { relation: { database_id: dbId } };
         break;
       }
       default:
@@ -502,6 +520,27 @@ async function setTaskUrlProperties(taskId, urls) {
       'Stop URL': { url: urls.stop },
     },
   }));
+}
+
+// New: reusable helper to refresh action URLs for every task in a database
+async function refreshActionLinks(tasksDbId, baseUrl, appSecret, calendarDbId) {
+  if (!tasksDbId) throw new Error('tasksDbId is required');
+  if (!baseUrl) throw new Error('baseUrl is required');
+  if (!appSecret) throw new Error('appSecret is required');
+  let cursor;
+  do {
+    const resp = await withRetry(() => ensureClient().databases.query({ database_id: tasksDbId, start_cursor: cursor }));
+    for (const row of resp.results) {
+      const urls = {
+        start: buildActionUrl(baseUrl, 'start', { taskId: row.id, tasksDbId, calendarDbId: calendarDbId || '' }, appSecret),
+        pause: buildActionUrl(baseUrl, 'pause', { taskId: row.id, tasksDbId, calendarDbId: calendarDbId || '' }, appSecret),
+        stop: buildActionUrl(baseUrl, 'stop', { taskId: row.id, tasksDbId, calendarDbId: calendarDbId || '' }, appSecret),
+      };
+      await setTaskUrlProperties(row.id, urls);
+      // Intentionally do NOT inject new link paragraphs to avoid duplicates.
+    }
+    cursor = resp.has_more ? resp.next_cursor : undefined;
+  } while (cursor);
 }
 
 async function createRelationPlaceholders(databases, parentPageId) {
@@ -596,26 +635,15 @@ async function deployBlueprint(blueprintPath, targetPageId, opts = {}) {
   const seeds = doc.install?.seeds || {};
   const createdSeeds = await createSeeds(seeds, aliasToId);
 
-  // Triggers for tasks
-  const tasksAlias = doc.workflows?.find?.(() => false) ? null : (databases.find(d => d.alias === 'tasks') ? 'tasks' : null);
-  if (tasksAlias && baseUrl && appSecret) {
-    const tasksDbId = aliasToId[tasksAlias];
-    const calendarDbId = aliasToId['calendar'];
-    // Query all tasks (including seeds) and attach links
-    let cursor;
-    do {
-      const resp = await withRetry(() => ensureClient().databases.query({ database_id: tasksDbId, start_cursor: cursor }));
-      for (const row of resp.results) {
-        const urls = {
-          start: buildActionUrl(baseUrl, 'start', { taskId: row.id, tasksDbId, calendarDbId }, appSecret),
-          pause: buildActionUrl(baseUrl, 'pause', { taskId: row.id, tasksDbId, calendarDbId }, appSecret),
-          stop: buildActionUrl(baseUrl, 'stop', { taskId: row.id, tasksDbId, calendarDbId }, appSecret),
-        };
-        await setTaskUrlProperties(row.id, urls);
-        await injectActionLinksOnTask(row.id, urls);
-      }
-      cursor = resp.has_more ? resp.next_cursor : undefined;
-    } while (cursor);
+  // Optional: attach action URLs based on workflows or defaults
+  if (baseUrl && appSecret) {
+    const workflows = Array.isArray(doc.workflows) ? doc.workflows : [];
+    const attach = workflows.find(wf => wf && wf.type === 'attach_action_links');
+    const tasksAlias = attach?.database || (databases.find(d => d.alias === 'tasks') ? 'tasks' : null);
+    const calendarAlias = attach?.calendar_database || (databases.find(d => d.alias === 'calendar') ? 'calendar' : null);
+    if (tasksAlias) {
+      await refreshActionLinks(aliasToId[tasksAlias], baseUrl, appSecret, calendarAlias ? aliasToId[calendarAlias] : undefined);
+    }
   }
 
   // Create minimal install info page (without secrets)
@@ -624,7 +652,27 @@ async function deployBlueprint(blueprintPath, targetPageId, opts = {}) {
     properties: { title: { title: [{ type: 'text', text: { content: (doc.metadata?.name || 'App') + ' - Installed' } }] } },
   }));
   const summary = `Installed app: ${doc.metadata?.name || 'App'}\nTasks DB: ${aliasToId.tasks || '-'}\nCalendar DB: ${aliasToId.calendar || '-'}\nBase URL: ${baseUrl || '-'}\n`;
-  await withRetry(() => ensureClient().blocks.children.append({ block_id: info.id, children: [ { type: 'paragraph', paragraph: { rich_text: [{ type: 'text', text: { content: summary } }] } } ] }));
+
+  const workflowBlocks = [];
+  const wfList = Array.isArray(doc.workflows) ? doc.workflows : [];
+  if (wfList.length) {
+    workflowBlocks.push({ type: 'heading_2', heading_2: { rich_text: [{ type: 'text', text: { content: 'Workflows' } }] } });
+    for (const wf of wfList) {
+      if (wf.type === 'attach_action_links') {
+        workflowBlocks.push({ type: 'paragraph', paragraph: { rich_text: [{ type: 'text', text: { content: `Attach action links to database: ${wf.database || 'tasks'} (calendar: ${wf.calendar_database || 'none'})` } }] } });
+      } else if (wf.type === 'webhook') {
+        const fullPath = baseUrl ? `${baseUrl.replace(/\/$/, '')}${wf.path}` : wf.path;
+        workflowBlocks.push({ type: 'paragraph', paragraph: { rich_text: [{ type: 'text', text: { content: `Webhook: ${wf.name || '-'} ${wf.method || 'POST'} ${fullPath || wf.path}` } }] } });
+        if (wf.description) {
+          workflowBlocks.push({ type: 'paragraph', paragraph: { rich_text: [{ type: 'text', text: { content: wf.description } }] } });
+        }
+      } else if (wf.type === 'property_change') {
+        workflowBlocks.push({ type: 'paragraph', paragraph: { rich_text: [{ type: 'text', text: { content: `Property change: ${wf.database}.${wf.property} changes_to ${wf.when?.changes_to} -> webhook ${wf.webhook}` } }] } });
+      }
+    }
+  }
+
+  await withRetry(() => ensureClient().blocks.children.append({ block_id: info.id, children: [ { type: 'paragraph', paragraph: { rich_text: [{ type: 'text', text: { content: summary } }] } }, ...workflowBlocks ] }));
 
   return { aliasToId, pages: createdPages, info: info.id };
 }

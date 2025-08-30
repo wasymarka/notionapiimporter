@@ -4,8 +4,7 @@ CLI do klonowania i tworzenia szablonów Notion na podstawie istniejących stron
 
 ## Instalacja
 
-- Node.js >= 18 (zalecane 20)
-- Ustaw zmienną środowiskową NOTION_TOKEN w pliku `.env`:
+- Node.js >= 18 (zalecane 20)\n- Ustaw zmienną środowiskową NOTION_TOKEN w pliku `.env`:
 
 ```
 NOTION_TOKEN=YOUR_NOTION_TOKEN_HERE
@@ -69,6 +68,56 @@ node index.js from-json templates/example-database.json <TARGET_PAGE_ID> --paren
 ```
 node index.js to-json <PAGE_OR_DB_ID> templates/export.json
 ```
+
+## Notion Apps – Szybki start (Time Tracker)
+
+Poniższe kroki pokazują jak wdrożyć przykładową aplikację Time Tracker z blueprintu YAML, wraz z backendem akcji i komendami utrzymaniowymi.
+
+1) Backend – wybierz jedną z opcji:
+- Vercel:
+  - Skopiuj katalog `backend-template/vercel` do własnego repo/projektu Vercel.
+  - Ustaw zmienne środowiskowe: `APP_SECRET` (silny sekret HMAC) i `NOTION_TOKEN`.
+  - Uruchom deploy. Endpointy akcji dostępne będą pod: `https://<twoja-apka>.vercel.app/api/a/{start|pause|stop}` oraz webhook `POST /api/webhook/:name?secret=APP_SECRET`.
+- Cloudflare Workers:
+  - Skopiuj katalog `backend-template/workers`.
+  - W pliku `wrangler.toml` ustaw `name` i dodaj zmienne `APP_SECRET`, `NOTION_TOKEN` (np. `wrangler secret put APP_SECRET`).
+  - Deploy: `wrangler deploy`. Endpointy: `https://<twoja-nazwa>.workers.dev/a/{start|pause|stop}` i webhook `POST /webhook/:name?secret=APP_SECRET`.
+
+2) Konfiguracja blueprintu:
+- Edytuj `blueprints/time-tracker-system.yml` i ustaw `backend.baseUrl` na adres backendu (bez końcowego `/`).
+- Opcjonalnie dostosuj sekcję `workflows` (np. `attach_action_links`, `webhook`, `property_change`).
+
+3) Wdrożenie do Notion:
+```
+node index.js deploy blueprints/time-tracker-system.yml <TARGET_PAGE_ID> \
+  --baseUrl "https://<twoja-apka>/api" \
+  --appSecret "<APP_SECRET>"
+```
+- Komenda utworzy bazy (Tasks, Calendar), stronę „Time Tracker”, zasieje przykładowe dane i podstawi podpisane linki Start/Pause/Stop w wierszach Tasks.
+- Dodatkowo powstanie strona „Installed” z podsumowaniem i sekcją „Workflows”.
+
+4) Utrzymanie linków akcji (bez pełnego redeploy):
+```
+node index.js refresh-actions <TASKS_DB_ID> \
+  --baseUrl "https://<twoja-apka>/api" \
+  --appSecret "<APP_SECRET>" \
+  [--calendarDbId <CALENDAR_DB_ID>]
+```
+- Nadpisuje właściwości URL (Start URL/Pause URL/Stop URL) dla wszystkich zadań w wybranej bazie.
+
+5) Testowanie w Notion:
+- Otwórz bazę Tasks, kliknij Start aby uruchomić licznik (ustawia Status „In Progress”, zaznacza „Timer Running”, ustawia „Last Started At”).
+- Kliknij Pause aby zaktualizować „Total Tracked (min)” o czas od ostatniego startu i zatrzymać licznik.
+- Kliknij Stop aby zakończyć zadanie (Status „Done”), zapisać czas i dodać wpis w Calendar (z relacją do zadania).
+
+Uwagi dot. bezpieczeństwa:
+- Linki akcji są podpisane HMAC z użyciem `APP_SECRET` – backend weryfikuje `sig` i parametry.
+- Integracja Notion powinna mieć minimalne uprawnienia (tylko do wymaganych baz/stron).
+
+Sekcja Workflows w YAML:
+- `attach_action_links`: automatyczne podpięcie linków akcji do bazy `tasks` (opcjonalnie wskazanie `calendar_database`).
+- `webhook`: dokumentuje dostępny endpoint webhook (np. `POST /webhook/task-completed`).
+- `property_change`: opisuje sugerowany trigger (np. zmiana Status -> wywołanie webhooka). Implementacja automatyzacji leży po stronie Notion automations/Zapier/Make.
 
 ## Uwagi
 

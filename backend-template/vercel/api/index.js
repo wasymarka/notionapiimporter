@@ -31,6 +31,22 @@ function bad(res, status, message) {
   return json(res, status, { error: message });
 }
 
+async function readBody(req) {
+  return new Promise((resolve, reject) => {
+    let data = '';
+    req.on('data', chunk => { data += chunk; });
+    req.on('end', () => {
+      try {
+        if (!data) return resolve(null);
+        const ct = req.headers['content-type'] || '';
+        if (ct.includes('application/json')) return resolve(JSON.parse(data));
+        resolve(data);
+      } catch (e) { reject(e); }
+    });
+    req.on('error', reject);
+  });
+}
+
 async function handleAction(action, req, res) {
   const secret = process.env.APP_SECRET;
   const notionToken = process.env.NOTION_TOKEN;
@@ -139,10 +155,26 @@ module.exports = async (req, res) => {
     if (!pathname.startsWith('/api')) {
       res.statusCode = 404; res.end('Not Found'); return;
     }
+    // Action routes
     const actionMatch = pathname.match(/\/a\/(start|pause|stop)$/);
     const action = actionMatch ? actionMatch[1] : null;
-    if (!action) return bad(res, 404, 'Route not found');
-    await handleAction(action, req, res);
+    if (action) return await handleAction(action, req, res);
+
+    // Webhook routes: POST /api/webhook/:name?secret=APP_SECRET
+    const webhookMatch = pathname.match(/\/webhook\/([A-Za-z0-9_-]+)$/);
+    if (webhookMatch) {
+      if (req.method !== 'POST') return bad(res, 405, 'Method Not Allowed');
+      const name = webhookMatch[1];
+      const secret = process.env.APP_SECRET;
+      const provided = url.searchParams.get('secret');
+      if (!secret) return bad(res, 500, 'Missing APP_SECRET');
+      if (!provided || provided !== secret) return bad(res, 401, 'Invalid secret');
+      const body = await readBody(req);
+      // You can add custom webhook handlers per name here
+      return json(res, 200, { ok: true, webhook: name, received: body ? true : false });
+    }
+
+    return bad(res, 404, 'Route not found');
   } catch (e) {
     console.error(e);
     bad(res, 500, 'Internal error');
