@@ -1,0 +1,67 @@
+metadata:
+  name: Time Tracker App
+  version: 1.0.0
+
+backend:
+  # Set this to your deployed backend base URL (no trailing slash)
+  # Examples:
+  # - Vercel: https://your-app.vercel.app/api
+  # - Cloudflare Workers: https://your-app.workers.dev
+  baseUrl: https://REPLACE-ME
+
+resources:
+  databases:
+    - alias: tasks
+      title: Tasks
+      properties:
+        Name:
+          type: title
+        Status:
+          type: status
+          status:
+            options: ["Todo", "In Progress", "Paused", "Done"]
+        Timer Running:
+          type: checkbox
+        Last Started At:
+          type: date
+        Total Tracked (min):
+          type: number
+        Start URL:
+          type: url
+        Pause URL:
+          type: url
+        Stop URL:
+          type: url
+        Calendar:
+          type: relation
+          relation:
+            database: calendar
+    - alias: calendar
+      title: Calendar
+      properties:
+        Name:
+          type: title
+        When:
+          type: date
+        Duration (min):
+          type: number
+        Task:
+          type: relation
+          relation:
+            database: tasks
+  pages:
+    - alias: home
+      title: "Time Tracker"
+      children:
+        - type: paragraph
+          paragraph:
+            rich_text:
+              - type: text
+                text:
+                  content: "Welcome to the Time Tracker App. Use the Tasks database to start, pause, and stop tracking."
+
+install:
+  # Simple seed content
+  seeds:
+    tasks:
+      - Name: "Sample Task"

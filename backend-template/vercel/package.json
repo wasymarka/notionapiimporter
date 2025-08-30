@@ -1,0 +1,13 @@
+{
+  "name": "notion-app-backend-template",
+  "version": "1.0.0",
+  "private": true,
+  "type": "commonjs",
+  "dependencies": {
+    "@notionhq/client": "^2.2.14"
+  },
+  "scripts": {
+    "dev": "vercel dev",
+    "start": "node api/index.js"
+  }
+}

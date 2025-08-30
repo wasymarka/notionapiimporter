@@ -9,8 +9,10 @@ const { hideBin } = require('yargs/helpers');
 const ora = require('ora');
 const kleur = require('kleur');
 const { Client } = require('@notionhq/client');
+const crypto = require('crypto');
+let yaml;
+try { yaml = require('js-yaml'); } catch (_) { yaml = null; }
 
-let notion = null;
 function ensureClient() {
   if (!notion) {
     const token = process.env.NOTION_TOKEN || process.env.NOTION_API_KEY;
@@ -371,6 +373,27 @@ async function main() {
         process.exitCode = 1;
       }
     })
+    // New: Deploy a Notion App from YAML blueprint
+    .command('deploy <blueprintPath> <targetId>', 'Deploy a Notion App from YAML blueprint', (y) => {
+      return y
+        .positional('blueprintPath', { describe: 'Path to YAML blueprint file', type: 'string' })
+        .positional('targetId', { describe: 'Target page ID where resources will be created', type: 'string' })
+        .option('baseUrl', { type: 'string', describe: 'Override backend base URL' })
+        .option('appSecret', { type: 'string', describe: 'HMAC secret for signing action URLs (optional)' });
+    }, async (args) => {
+      const spinner = ora('Deploying Notion App...').start();
+      try {
+        assertIdLike(args.targetId, 'targetId');
+        const res = await deployBlueprint(args.blueprintPath, args.targetId, { baseUrl: args.baseUrl, appSecret: args.appSecret });
+        spinner.succeed(kleur.green(`Deployment complete. Info page: ${res.info}`));
+        if (!args.appSecret) {
+          console.log(kleur.yellow('Note: appSecret not provided; URL buttons were not signed/attached. Re-run a maintenance step once backend is configured.'));
+        }
+      } catch (err) {
+        spinner.fail(kleur.red(err.message));
+        process.exitCode = 1;
+      }
+    })
     .demandCommand(1)
     .help()
     .argv;
@@ -380,3 +403,228 @@ main().catch((e) => {
   console.error(kleur.red(e.stack || e.message));
   process.exit(1);
 });
+
+// Build Notion DB properties from simplified blueprint schema
+function buildDbProperties(schema = {}, aliasToId = {}) {
+  const out = {};
+  for (const [name, def] of Object.entries(schema)) {
+    const t = def?.type;
+    if (!t) continue;
+    switch (t) {
+      case 'title':
+        out[name] = { title: {} };
+        break;
+      case 'status': {
+        const options = def?.status?.options || [];
+        out[name] = { status: { options: options.map(o => ({ name: o.name || o, color: o.color || 'default' })) } };
+        break;
+      }
+      case 'multi_select': {
+        const options = def?.multi_select?.options || [];
+        out[name] = { multi_select: { options: options.map(o => ({ name: o.name || o, color: o.color || 'default' })) } };
+        break;
+      }
+      case 'select': {
+        const options = def?.select?.options || [];
+        out[name] = { select: { options: options.map(o => ({ name: o.name || o, color: o.color || 'default' })) } };
+        break;
+      }
+      case 'checkbox':
+        out[name] = { checkbox: {} };
+        break;
+      case 'number':
+        out[name] = { number: {} };
+        break;
+      case 'date':
+        out[name] = { date: {} };
+        break;
+      case 'rich_text':
+        out[name] = { rich_text: {} };
+        break;
+      case 'url':
+        out[name] = { url: {} };
+        break;
+      case 'relation': {
+        const alias = def?.relation?.database;
+        const dbId = aliasToId[alias];
+        if (!dbId) {
+          // Fallback: will set later, but create a placeholder the API rejects; so skip for now
+          continue;
+        }
+        out[name] = { relation: { database_id: dbId, type: 'single_property', single_property: {} } };
+        break;
+      }
+      default:
+        // ignore unsupported types for now
+        break;
+    }
+  }
+  return out;
+}
+
+function hmacSign(secret, payload) {
+  return crypto.createHmac('sha256', secret).update(payload).digest('hex');
+}
+
+function buildActionUrl(baseUrl, action, params, secret) {
+  const ts = Date.now().toString();
+  const nonce = crypto.randomUUID();
+  const ordered = ['taskId', 'action', 'ts', 'nonce', 'tasksDbId', 'calendarDbId']
+    .map(k => params[k] || (k === 'action' ? action : ''));
+  const sig = secret ? hmacSign(secret, ordered.join('|')) : undefined;
+  const sp = new URLSearchParams({ ...params, action, ts, nonce });
+  if (sig) sp.set('sig', sig);
+  const url = `${baseUrl.replace(/\/$/, '')}/a/${action}?${sp.toString()}`;
+  return url;
+}
+
+async function injectActionLinksOnTask(taskPageId, links) {
+  // Append a paragraph with Start | Pause | Stop links
+  const rich = [];
+  const entries = [ ['Start', links.start], ['Pause', links.pause], ['Stop', links.stop] ];
+  entries.forEach((pair, idx) => {
+    const [label, href] = pair;
+    rich.push({ type: 'text', text: { content: label, link: { url: href } } });
+    if (idx < entries.length - 1) rich.push({ type: 'text', text: { content: '  |  ' } });
+  });
+  await withRetry(() => ensureClient().blocks.children.append({
+    block_id: taskPageId,
+    children: [{ type: 'paragraph', paragraph: { rich_text: rich } }],
+  }));
+}
+
+async function setTaskUrlProperties(taskId, urls) {
+  await withRetry(() => ensureClient().pages.update({
+    page_id: taskId,
+    properties: {
+      'Start URL': { url: urls.start },
+      'Pause URL': { url: urls.pause },
+      'Stop URL': { url: urls.stop },
+    },
+  }));
+}
+
+async function createRelationPlaceholders(databases, parentPageId) {
+  // First pass create DBs without relation properties; second pass add relations
+  const created = {};
+  // Create in order
+  for (const db of databases) {
+    const propsNoRelation = buildDbProperties(
+      Object.fromEntries(Object.entries(db.properties || {}).filter(([, v]) => v.type !== 'relation'))
+    );
+    const createdDb = await withRetry(() => ensureClient().databases.create({
+      parent: { page_id: parentPageId },
+      title: [{ type: 'text', text: { content: db.title } }],
+      properties: propsNoRelation,
+    }));
+    created[db.alias] = createdDb.id;
+  }
+  // Second pass: patch in relation properties where needed
+  for (const db of databases) {
+    const relationProps = Object.fromEntries(
+      Object.entries(db.properties || {}).filter(([, v]) => v.type === 'relation')
+    );
+    if (Object.keys(relationProps).length) {
+      const schema = buildDbProperties(db.properties, created);
+      await withRetry(() => ensureClient().databases.update({
+        database_id: created[db.alias],
+        properties: schema,
+      }));
+    }
+  }
+  return created;
+}
+
+async function createSeeds(seeds = {}, aliasToId = {}) {
+  // Support simple seeds for databases by alias, e.g., tasks: [{ Name: "Sample Task" }]
+  const created = { pages: {}, rows: {} };
+  for (const [alias, rows] of Object.entries(seeds || {})) {
+    const databaseId = aliasToId[alias];
+    if (!databaseId) continue;
+    const titleName = await getDatabaseTitlePropName(databaseId);
+    for (const row of rows) {
+      const titleVal = row[titleName] || row.Name || 'Untitled';
+      const properties = Object.fromEntries(
+        Object.entries(row).map(([k, v]) => {
+          if (k === titleName || k === 'Name') return [titleName, { title: [{ type: 'text', text: { content: String(titleVal) } }] }];
+          if (typeof v === 'number') return [k, { number: v }];
+          if (typeof v === 'string') return [k, { rich_text: [{ type: 'text', text: { content: v } }] }];
+          return [k, v];
+        })
+      );
+      const page = await withRetry(() => ensureClient().pages.create({ parent: { database_id: databaseId }, properties }));
+      if (!created.rows[alias]) created.rows[alias] = [];
+      created.rows[alias].push(page);
+    }
+  }
+  return created;
+}
+
+async function deployBlueprint(blueprintPath, targetPageId, opts = {}) {
+  if (!yaml) throw new Error('YAML support not installed. Please ensure js-yaml is in dependencies.');
+  const full = path.resolve(process.cwd(), blueprintPath);
+  if (!fs.existsSync(full)) throw new Error('Blueprint file not found');
+  const doc = yaml.load(fs.readFileSync(full, 'utf8')) || {};
+  const backend = doc.backend || {};
+  const baseUrl = opts.baseUrl || backend.baseUrl;
+  const appSecret = opts.appSecret; // do not store in Notion
+
+  const databases = Array.isArray(doc.resources?.databases) ? doc.resources.databases : [];
+  const pages = Array.isArray(doc.resources?.pages) ? doc.resources.pages : [];
+
+  // Create DBs (two-pass to attach relations)
+  const aliasToId = await createRelationPlaceholders(databases, targetPageId);
+
+  // Create pages under target
+  const createdPages = {};
+  for (const pg of pages) {
+    const created = await withRetry(() => ensureClient().pages.create({
+      parent: { page_id: targetPageId },
+      properties: { title: { title: [{ type: 'text', text: { content: pg.title || 'Untitled' } }] } },
+      icon: pg.icon,
+      cover: pg.cover,
+    }));
+    createdPages[pg.alias || created.id] = created.id;
+    if (Array.isArray(pg.children) && pg.children.length) {
+      for (let i = 0; i < pg.children.length; i += 50) {
+        await withRetry(() => ensureClient().blocks.children.append({ block_id: created.id, children: pg.children.slice(i, i + 50) }));
+      }
+    }
+  }
+
+  // Seeds
+  const seeds = doc.install?.seeds || {};
+  const createdSeeds = await createSeeds(seeds, aliasToId);
+
+  // Triggers for tasks
+  const tasksAlias = doc.workflows?.find?.(() => false) ? null : (databases.find(d => d.alias === 'tasks') ? 'tasks' : null);
+  if (tasksAlias && baseUrl && appSecret) {
+    const tasksDbId = aliasToId[tasksAlias];
+    const calendarDbId = aliasToId['calendar'];
+    // Query all tasks (including seeds) and attach links
+    let cursor;
+    do {
+      const resp = await withRetry(() => ensureClient().databases.query({ database_id: tasksDbId, start_cursor: cursor }));
+      for (const row of resp.results) {
+        const urls = {
+          start: buildActionUrl(baseUrl, 'start', { taskId: row.id, tasksDbId, calendarDbId }, appSecret),
+          pause: buildActionUrl(baseUrl, 'pause', { taskId: row.id, tasksDbId, calendarDbId }, appSecret),
+          stop: buildActionUrl(baseUrl, 'stop', { taskId: row.id, tasksDbId, calendarDbId }, appSecret),
+        };
+        await setTaskUrlProperties(row.id, urls);
+        await injectActionLinksOnTask(row.id, urls);
+      }
+      cursor = resp.has_more ? resp.next_cursor : undefined;
+    } while (cursor);
+  }
+
+  // Create minimal install info page (without secrets)
+  const info = await withRetry(() => ensureClient().pages.create({
+    parent: { page_id: targetPageId },
+    properties: { title: { title: [{ type: 'text', text: { content: (doc.metadata?.name || 'App') + ' - Installed' } }] } },
+  }));
+  const summary = `Installed app: ${doc.metadata?.name || 'App'}\nTasks DB: ${aliasToId.tasks || '-'}\nCalendar DB: ${aliasToId.calendar || '-'}\nBase URL: ${baseUrl || '-'}\n`;
+  await withRetry(() => ensureClient().blocks.children.append({ block_id: info.id, children: [ { type: 'paragraph', paragraph: { rich_text: [{ type: 'text', text: { content: summary } }] } } ] }));
+
+  return { aliasToId, pages: createdPages, info: info.id };
+}

@@ -4,7 +4,8 @@
   "description": "CLI tool to instantiate Notion templates programmatically",
   "main": "index.js",
   "bin": {
-    "notion-template": "index.js"
+    "notion-template": "index.js",
+    "notion-app": "index.js"
   },
   "scripts": {
     "start": "node index.js --help",
@@ -22,6 +23,7 @@
   "dependencies": {
     "@notionhq/client": "^4.0.2",
     "dotenv": "^17.2.1",
+    "js-yaml": "^4.1.0",
     "kleur": "^4.1.5",
     "ora": "^8.2.0",
     "yargs": "^18.0.0"
